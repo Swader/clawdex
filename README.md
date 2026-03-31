@@ -80,7 +80,7 @@ When Telegram file delivery is requested, the control plane also checks for the 
 - `erbine-general`
   `/newctx erbine-general erbine host`
 - `Project: bitfalls-dashboard`
-  `/newctx bitfalls-dashboard erbine https://github.com/bitfalls/dashboard.git main`
+  `/newctx bitfalls-dashboard erbine https://github.com/bitfalls/dashboard.git master`
   or `/newctx bitfalls-dashboard valkyrie /absolute/path/to/repo`
 - `Scratchpad`
   `/newctx scratchpad valkyrie scratch`

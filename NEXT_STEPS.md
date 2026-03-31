@@ -57,7 +57,7 @@ These are the remaining manual prerequisites before remote repo execution on `er
 7. For a repo topic, either bind an existing path or give a git URL:
 
 ```text
-/newctx myproj erbine https://github.com/example/project.git main
+/newctx myproj erbine https://github.com/example/project.git master
 ```
 
 If `erbine` is still unavailable, those contexts should remain `pending` instead of failing hard.

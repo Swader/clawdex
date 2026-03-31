@@ -495,7 +495,7 @@ fi
         target,
         rootPath: `${worker.managedHostRoot}/${request.slug}`,
         worktreePath: `${worker.managedHostRoot}/${request.slug}`,
-        branchName: "main",
+        branchName: "master",
         baseBranch: null
       };
     }
@@ -506,7 +506,7 @@ fi
         target,
         rootPath: `${worker.managedScratchRoot}/${request.slug}`,
         worktreePath: `${worker.managedScratchRoot}/${request.slug}`,
-        branchName: "main",
+        branchName: "master",
         baseBranch: null
       };
     }
@@ -636,8 +636,8 @@ workspace="$(expand_home_path "$workspace_raw")"
 mkdir -p "$workspace"
 
 if ! git -C "$workspace" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  git init -b main "$workspace" >/dev/null 2>&1 || git -C "$workspace" init >/dev/null 2>&1
-  git -C "$workspace" symbolic-ref HEAD refs/heads/main >/dev/null 2>&1 || true
+  git init -b master "$workspace" >/dev/null 2>&1 || git -C "$workspace" init >/dev/null 2>&1
+  git -C "$workspace" symbolic-ref HEAD refs/heads/master >/dev/null 2>&1 || true
 fi
 
 ensure_factory_files "$workspace"

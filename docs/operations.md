@@ -88,7 +88,7 @@ That creates:
 ### Managed clone from a git URL
 
 ```text
-/newctx bitfalls-dashboard erbine https://github.com/example/project.git main
+/newctx bitfalls-dashboard erbine https://github.com/example/project.git master
 ```
 
 If `erbine` is unavailable, the context is still created and stored as `pending`.
@@ -163,7 +163,7 @@ Audio and voice-only Telegram messages are intentionally blocked before Codex in
 
 ```text
 /bind valkyrie scratch
-/bind erbine https://github.com/example/project.git main
+/bind erbine https://github.com/example/project.git master
 ```
 
 Legacy `/bind <slug>` is still accepted to attach the topic to an existing stored context.
