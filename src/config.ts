@@ -19,6 +19,7 @@ export interface FactoryConfig {
   controlRoot: string;
   dbPath: string;
   contextsDir: string;
+  cronSnapshotsDir: string;
   logsDir: string;
   sshKnownHostsPath: string;
   factoryRoot: string;
@@ -31,6 +32,7 @@ export interface FactoryConfig {
   telegramControlChatId: number | null;
   allowedTelegramUserId: number;
   telegramPollTimeoutSeconds: number;
+  cronPollIntervalSeconds: number;
   localMachine: string;
   workers: FactoryWorkerConfig[];
   usageAdapter: string;
@@ -145,7 +147,7 @@ const projectRoot = resolve(import.meta.dir, "..");
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): FactoryConfig {
   const controlRoot = env.FACTORY_CONTROL_ROOT?.trim() || "/srv/telemux";
   const factoryRoot = env.FACTORY_FACTORY_ROOT?.trim() || "/srv/factory";
-  const localMachine = env.FACTORY_LOCAL_MACHINE?.trim() || "valkyrie";
+  const localMachine = env.FACTORY_LOCAL_MACHINE?.trim() || "control";
   const managedRepoRoot = resolve(factoryRoot, "repos");
   const managedHostRoot = resolve(factoryRoot, "hostctx");
   const managedScratchRoot = resolve(factoryRoot, "scratch");
@@ -167,6 +169,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): FactoryConfig 
     controlRoot,
     dbPath: resolve(controlRoot, "db.sqlite"),
     contextsDir: resolve(controlRoot, "contexts"),
+    cronSnapshotsDir: resolve(controlRoot, "crons"),
     logsDir: resolve(controlRoot, "logs"),
     sshKnownHostsPath: resolve(controlRoot, "ssh_known_hosts"),
     factoryRoot,
@@ -177,8 +180,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): FactoryConfig 
     dashboardPort: readNumber(env, "FACTORY_DASHBOARD_PORT", 8787),
     telegramBotToken: env.FACTORY_TELEGRAM_BOT_TOKEN?.trim() || "",
     telegramControlChatId: readOptionalNumber(env, "FACTORY_TELEGRAM_CONTROL_CHAT_ID"),
-    allowedTelegramUserId: readNumber(env, "FACTORY_ALLOWED_TELEGRAM_USER_ID", 16708526),
+    allowedTelegramUserId: readNumber(env, "FACTORY_ALLOWED_TELEGRAM_USER_ID", 0),
     telegramPollTimeoutSeconds: readNumber(env, "FACTORY_TELEGRAM_POLL_TIMEOUT_SECONDS", 30),
+    cronPollIntervalSeconds: readNumber(env, "FACTORY_CRON_POLL_INTERVAL_SECONDS", 30),
     localMachine,
     workers,
     usageAdapter: env.FACTORY_USAGE_ADAPTER?.trim() || "manual",
@@ -192,6 +196,7 @@ export function ensureProjectPaths(targetConfig: FactoryConfig = config): void {
   const dirs = [
     targetConfig.controlRoot,
     targetConfig.contextsDir,
+    targetConfig.cronSnapshotsDir,
     targetConfig.logsDir,
     targetConfig.factoryRoot,
     targetConfig.managedRepoRoot,

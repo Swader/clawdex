@@ -30,6 +30,8 @@ export const TELEGRAM_BOT_COMMANDS: TelegramBotCommand[] = [
   { command: "showcommands", description: "Show registered Telegram commands" },
   { command: "whoami", description: "Show Telegram ids and current binding" },
   { command: "workers", description: "List worker status and transport" },
+  { command: "crons", description: "List scheduled jobs for this topic/context" },
+  { command: "cron", description: "Inspect or manage one scheduled job" },
   { command: "mode", description: "Set or show the Codex mode for this topic" },
   { command: "model", description: "Set or show the Codex model override" },
   { command: "effort", description: "Set or show the Codex reasoning effort" },

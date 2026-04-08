@@ -47,12 +47,14 @@ export function startDashboard(config: FactoryConfig, db: FactoryDb, workers: Wo
           dashboard: `${config.dashboardHost}:${config.dashboardPort}`,
           telegramConfigured: Boolean(config.telegramBotToken),
           workers: workers.knownHosts().length,
-          contexts: db.listContexts().length
+          contexts: db.listContexts().length,
+          crons: db.listCronJobs().length
         });
       }
 
       const workerRows = db.listWorkers();
       const contextRows = db.listContexts();
+      const cronRows = db.listCronJobs();
 
       const workerHtml = workerRows.length
         ? workerRows
@@ -93,6 +95,24 @@ export function startDashboard(config: FactoryConfig, db: FactoryDb, workers: Wo
             )
             .join("")
         : `<tr><td colspan="8">No contexts yet.</td></tr>`;
+
+      const cronHtml = cronRows.length
+        ? cronRows
+            .map(
+              (job) => `
+                <tr>
+                  <td>${escapeHtml(job.id)}</td>
+                  <td>${escapeHtml(job.label)}</td>
+                  <td>${escapeHtml(job.kind)}</td>
+                  <td>${badge(job.enabled ? "active" : "archived")}</td>
+                  <td>${escapeHtml(job.nextRunAt || "none")}</td>
+                  <td>${escapeHtml(job.executionContextSlug || "none")}</td>
+                  <td>${escapeHtml(`${job.targetChatId}:${job.targetThreadId ?? "none"}`)}</td>
+                </tr>
+              `
+            )
+            .join("")
+        : `<tr><td colspan="7">No cron jobs yet.</td></tr>`;
 
       const html = `
         <!doctype html>
@@ -159,6 +179,7 @@ export function startDashboard(config: FactoryConfig, db: FactoryDb, workers: Wo
                   <span>telegram: ${config.telegramBotToken ? "configured" : "missing token"}</span>
                   <span>workers configured: ${escapeHtml(String(workers.knownHosts().length))}</span>
                   <span>contexts: ${escapeHtml(String(contextRows.length))}</span>
+                  <span>crons: ${escapeHtml(String(cronRows.length))}</span>
                 </div>
               </div>
 
@@ -196,6 +217,24 @@ export function startDashboard(config: FactoryConfig, db: FactoryDb, workers: Wo
                       </tr>
                     </thead>
                     <tbody>${contextHtml}</tbody>
+                  </table>
+                </section>
+
+                <section class="panel">
+                  <h2>Crons</h2>
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Id</th>
+                        <th>Label</th>
+                        <th>Kind</th>
+                        <th>State</th>
+                        <th>Next Run</th>
+                        <th>Context</th>
+                        <th>Target</th>
+                      </tr>
+                    </thead>
+                    <tbody>${cronHtml}</tbody>
                   </table>
                 </section>
               </div>

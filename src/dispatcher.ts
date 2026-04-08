@@ -1,6 +1,8 @@
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { deliverAttachmentRequests, formatAttachmentDeliveryIssues } from "./attachment-delivery";
+import { CronManager } from "./cron-manager";
+import { CONTEXT_CRONS_FILE_NAME, CONTEXT_CRONS_WORKSPACE_PATH, CRON_REQUESTS_FILE_NAME, CRON_REQUESTS_WORKSPACE_PATH } from "./cron-jobs";
 import { ContextRecord, FactoryDb } from "./db";
 import { ContextService } from "./contexts";
 import { resolveManifestRequests, TELEGRAM_ATTACHMENTS_FILE_NAME, TELEGRAM_ATTACHMENTS_WORKSPACE_PATH } from "./telegram-attachments";
@@ -30,6 +32,9 @@ export interface DispatchResponse {
 export interface DispatchOptions {
   notifyAccepted?: boolean;
   telegramInput?: TelegramInboundMessageInput | null;
+  modelOverride?: string | null;
+  reasoningEffortOverride?: ContextRecord["reasoningEffortOverride"];
+  sourceLabel?: string | null;
 }
 
 function nowStamp(): string {
@@ -83,11 +88,14 @@ function buildPrompt(context: ContextRecord, mode: DispatchMode, instruction: st
     `Machine: ${context.machine}.`,
     `Transport: ${context.transport || "n/a"}.`,
     "Durable context state lives in .factory/STATE.json, .factory/SUMMARY.md, .factory/TODO.md, and .factory/ARTIFACTS.md.",
+    `If ${CONTEXT_CRONS_WORKSPACE_PATH} exists, read it too before making scheduling changes.`,
     "Start by reading those files and the current git status.",
     "Before finishing, update all relevant .factory files so the next run can resume cleanly.",
     "Record artifact paths in .factory/ARTIFACTS.md.",
     `These messages are coming through Telegram. If the user explicitly asks you to send or attach a file into the Telegram thread, keep your normal answer and also write ${TELEGRAM_ATTACHMENTS_WORKSPACE_PATH} as JSON like {"attachments":[{"path":"/absolute/path/to/file","caption":"optional short caption","type":"document"}]}.`,
     `Only list regular files that already exist and are already recorded in .factory/ARTIFACTS.md. Use type "photo" for images only when you want Telegram to render them inline. Do not create ${TELEGRAM_ATTACHMENTS_FILE_NAME} unless the user explicitly asked for a Telegram attachment.`,
+    `If the user explicitly asks to create, change, move, pause, resume, or delete a scheduled job, keep your normal answer and also write ${CRON_REQUESTS_WORKSPACE_PATH} as JSON like {"actions":[{"type":"create","job":{"label":"example","kind":"reminder","schedule":{"type":"once","at":"2026-04-08T09:00:00+02:00"},"reminderText":"Example reminder"}}]}.`,
+    `Use exact cron ids from ${CONTEXT_CRONS_FILE_NAME} when updating existing jobs if they are available. Do not create ${CRON_REQUESTS_FILE_NAME} unless the user explicitly asked about scheduled jobs.`,
     autonomousNote,
     `Control-plane mode: ${mode}.`,
     "Instruction:",
@@ -115,7 +123,8 @@ export class Dispatcher {
     private readonly db: FactoryDb,
     private readonly contexts: ContextService,
     private readonly workers: WorkerService,
-    private readonly telegram: TelegramBot
+    private readonly telegram: TelegramBot,
+    private readonly cronManager: CronManager
   ) {}
 
   isActive(slug: string): boolean {
@@ -161,7 +170,15 @@ export class Dispatcher {
       lastError: null
     });
 
-    const job = this.runJob(mode, savedContext, trimmedInstruction, replyTarget, logPath, options.telegramInput || null);
+    const job = this.runJob(
+      mode,
+      savedContext,
+      trimmedInstruction,
+      replyTarget,
+      logPath,
+      options.telegramInput || null,
+      options
+    );
     this.activeJobs.set(savedContext.slug, job);
     void job.finally(() => this.activeJobs.delete(savedContext.slug));
 
@@ -184,7 +201,8 @@ export class Dispatcher {
     instruction: string,
     replyTarget: TelegramTarget,
     logPath: string,
-    telegramInput: TelegramInboundMessageInput | null
+    telegramInput: TelegramInboundMessageInput | null,
+    options: DispatchOptions
   ): Promise<void> {
     const stopHeartbeat = this.startTypingHeartbeat(replyTarget);
 
@@ -257,8 +275,8 @@ export class Dispatcher {
       const result = await this.workers.runCodex(readyContext, prompt, mode, logPath, {
         workspaceFiles: preparedTelegramInput?.workspaceFiles,
         imagePaths: preparedTelegramInput?.imagePaths,
-        modelOverride: readyContext.modelOverride,
-        reasoningEffortOverride: readyContext.reasoningEffortOverride,
+        modelOverride: options.modelOverride ?? readyContext.modelOverride,
+        reasoningEffortOverride: options.reasoningEffortOverride ?? readyContext.reasoningEffortOverride,
         onSessionId: async (sessionId) => {
           const current = this.db.getContextBySlug(context.slug) || readyContext;
           this.contexts.saveContext({
@@ -276,6 +294,7 @@ export class Dispatcher {
         const artifacts = await this.workers.readFactoryFile(afterRunContext, "ARTIFACTS.md");
         const lastMessage = await this.workers.readWorkspaceFile(afterRunContext, ".factory/last-message.txt");
         const attachmentManifest = await this.workers.readFactoryFile(afterRunContext, TELEGRAM_ATTACHMENTS_FILE_NAME);
+        const cronManifest = await this.workers.readFactoryFile(afterRunContext, CRON_REQUESTS_FILE_NAME);
         const saved = this.contexts.saveContext({
           ...afterRunContext,
           state: "active",
@@ -294,11 +313,12 @@ export class Dispatcher {
           [
             reply,
             "",
-            `session=${saved.codexSessionId || "n/a"} | machine=${saved.machine} | usage=${usage.adapter}`
+            `session=${saved.codexSessionId || "n/a"} | machine=${saved.machine} | usage=${usage.adapter}${options.sourceLabel ? ` | source=${options.sourceLabel}` : ""}`
           ].join("\n")
         );
 
         await this.sendTelegramAttachments(saved, replyTarget, artifacts, attachmentManifest);
+        await this.applyCronManifest(saved, replyTarget, cronManifest);
         return;
       }
 
@@ -320,6 +340,17 @@ export class Dispatcher {
       );
     } finally {
       stopHeartbeat();
+    }
+  }
+
+  private async applyCronManifest(context: ContextRecord, replyTarget: TelegramTarget, manifestText: string | null): Promise<void> {
+    const notes = await this.cronManager.applyManifest(manifestText, {
+      context,
+      target: replyTarget
+    });
+
+    if (notes.length) {
+      await this.telegram.sendText(replyTarget, notes.map((note) => `Cron: ${note}`).join("\n"));
     }
   }
 

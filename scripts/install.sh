@@ -2,7 +2,6 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SERVICE_SRC="$ROOT/systemd/telemux.service"
 SERVICE_DST="$HOME/.config/systemd/user/telemux.service"
 BUN_BIN="${BUN_BIN:-$HOME/.bun/bin/bun}"
 OWNER_USER="${USER}"
@@ -48,9 +47,28 @@ mkdir -p \
 
 "$BUN_BIN" install
 
-install -m 0644 "$SERVICE_SRC" "$SERVICE_DST"
+cat > "$SERVICE_DST" <<EOF
+[Unit]
+Description=Clawdex control plane
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=$ROOT
+EnvironmentFile=$ROOT/.env
+ExecStart=$BUN_BIN run src/main.ts
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
+EOF
+
 sudo loginctl enable-linger "$OWNER_USER"
 systemctl --user daemon-reload
 systemctl --user enable --now telemux.service
 
-echo "Installed and started telemux.service"
+echo "Installed and started telemux.service for Clawdex"

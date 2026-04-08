@@ -1,15 +1,15 @@
 [
   {
-    "name": "valkyrie",
+    "name": "control",
     "transport": "local",
     "managedRepoRoot": "/srv/factory/repos",
     "managedHostRoot": "/srv/factory/hostctx",
     "managedScratchRoot": "/srv/factory/scratch"
   },
   {
-    "name": "erbine",
+    "name": "worker1",
     "transport": "ssh",
-    "sshTarget": "erbine",
+    "sshTarget": "worker1",
     "sshUser": "factory",
     "managedRepoRoot": "/srv/factory/repos",
     "managedHostRoot": "/srv/factory/hostctx",

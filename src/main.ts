@@ -1,4 +1,6 @@
 import { config, ensureProjectPaths } from "./config";
+import { CronManager } from "./cron-manager";
+import { CronScheduler } from "./cron-scheduler";
 import { ContextService } from "./contexts";
 import { FactoryDb } from "./db";
 import { Dispatcher } from "./dispatcher";
@@ -13,8 +15,10 @@ const db = new FactoryDb(config.dbPath);
 const contexts = new ContextService(db, config.usageAdapter, config.contextsDir);
 const workers = new WorkerService(config, db);
 const telegram = new TelegramBot(config, db);
-const dispatcher = new Dispatcher(config, db, contexts, workers, telegram);
-const commands = new CommandHandler(config, db, telegram, contexts, workers, dispatcher);
+const cronManager = new CronManager(config, db, workers);
+const dispatcher = new Dispatcher(config, db, contexts, workers, telegram, cronManager);
+const commands = new CommandHandler(config, db, telegram, contexts, workers, dispatcher, cronManager);
+const cronScheduler = new CronScheduler(config, db, cronManager, dispatcher, telegram);
 
 startDashboard(config, db, workers);
 
@@ -46,6 +50,7 @@ if (telegram.isConfigured()) {
       console.error("telegram command registration failed", error);
     });
   telegram.start((message) => commands.handleMessage(message));
+  cronScheduler.start();
   console.log("telegram polling enabled");
 } else {
   console.log("telegram polling disabled: FACTORY_TELEGRAM_BOT_TOKEN is empty");

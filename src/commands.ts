@@ -6,9 +6,11 @@ import {
   parseCodexModePreset,
   parseCodexReasoningEffort
 } from "./codex-runtime";
+import { CronManager } from "./cron-manager";
 import { ContextRecord, FactoryDb } from "./db";
 import { ContextService, nextRecommendedAction, normalizeSlug } from "./contexts";
 import { Dispatcher } from "./dispatcher";
+import { CronJobRecord } from "./cron-jobs";
 import { selectArtifactEntries, TelegramAttachmentRequest } from "./telegram-attachments";
 import { extractTelegramInput, filterPhaseOneTelegramInput, isAudioOnlyTelegramInput, telegramMessageText } from "./telegram-inputs";
 import { summarizeUsage } from "./usage";
@@ -134,7 +136,8 @@ export class CommandHandler {
     private readonly telegram: TelegramBot,
     private readonly contexts: ContextService,
     private readonly workers: WorkerService,
-    private readonly dispatcher: Dispatcher
+    private readonly dispatcher: Dispatcher,
+    private readonly cronManager: CronManager
   ) {}
 
   async handleMessage(message: TelegramMessage): Promise<void> {
@@ -219,6 +222,8 @@ export class CommandHandler {
               "/showcommands",
               "/whoami",
               "/workers",
+              "/crons",
+              "/cron <subcommand>",
               "/mode [fast|normal|max|clear]",
               "/model [model-id|clear]",
               "/effort [low|medium|high|xhigh|clear]",
@@ -235,7 +240,8 @@ export class CommandHandler {
               "/usage",
               "",
               "In a bound topic, plain text starts or resumes the stored Codex session.",
-              "Use /mode, /model, and /effort to change Codex runtime behavior for this topic without rebinding it."
+              "Use /mode, /model, and /effort to change Codex runtime behavior for this topic without rebinding it.",
+              "Use /crons to inspect scheduled jobs linked to this topic/context. Use /cron with a job id from /crons to pause, resume, move, retarget context, or tune job runtime."
             ].join("\n")
           );
           return;
@@ -308,6 +314,185 @@ export class CommandHandler {
               : "No workers configured."
           );
           return;
+        }
+
+        case "/crons": {
+          await this.telegram.sendText(target, this.cronManager.formatJobsOverview(boundContext, target));
+          return;
+        }
+
+        case "/cron": {
+          const parts = parsed.rest.split(/\s+/).filter(Boolean);
+          if (parts.length < 2) {
+            await this.telegram.sendText(
+              target,
+              [
+                "Usage:",
+                "/cron show <id>",
+                "/cron pause <id>",
+                "/cron resume <id>",
+                "/cron delete <id>",
+                "/cron move <id> here",
+                "/cron context <id> <slug-or-path>",
+                "/cron mode <id> [fast|normal|max|clear]",
+                "/cron model <id> [model-id|clear]",
+                "/cron effort <id> [low|medium|high|xhigh|clear]"
+              ].join("\n")
+            );
+            return;
+          }
+
+          const [subcommand, selectorText, ...restParts] = parts;
+          const job = this.cronManager.resolveJob({ id: selectorText, label: selectorText }, { context: boundContext, target });
+          const restText = restParts.join(" ").trim();
+
+          switch (subcommand.toLowerCase()) {
+            case "show": {
+              const effectiveContext = job.executionContextSlug ? this.db.getContextBySlug(job.executionContextSlug) : null;
+              const runtimeModel = job.modelOverride || effectiveContext?.modelOverride || "default";
+              const runtimeEffort = job.reasoningEffortOverride || effectiveContext?.reasoningEffortOverride || "default";
+              await this.telegram.sendText(
+                target,
+                [
+                  `Cron: ${job.id}`,
+                  `Label: ${job.label}`,
+                  `Kind: ${job.kind}`,
+                  `Enabled: ${job.enabled ? "yes" : "no"}`,
+                  `Schedule: ${this.formatCronSchedule(job)}`,
+                  `Next run: ${job.nextRunAt || "none"}`,
+                  `Pending run: ${job.pendingRunAt || "none"}`,
+                  `Context: ${job.executionContextSlug || "none"}`,
+                  `Target: ${job.targetChatId}:${job.targetThreadId ?? "none"}`,
+                  `Mode: model=${runtimeModel} effort=${runtimeEffort}`,
+                  job.reminderText ? `Reminder: ${job.reminderText}` : null,
+                  job.instruction ? `Instruction: ${job.instruction}` : null,
+                  job.lastError ? `Last error: ${compact(job.lastError)}` : null
+                ]
+                  .filter(Boolean)
+                  .join("\n")
+              );
+              return;
+            }
+
+            case "pause": {
+              const updated = await this.cronManager.pauseJob(job);
+              await this.telegram.sendText(target, `Cron paused: ${updated.id} (${updated.label})`);
+              return;
+            }
+
+            case "resume": {
+              const updated = await this.cronManager.resumeJob(job);
+              await this.telegram.sendText(target, `Cron resumed: ${updated.id} (${updated.label}) next=${updated.nextRunAt || "none"}`);
+              return;
+            }
+
+            case "delete": {
+              await this.cronManager.deleteJob(job);
+              await this.telegram.sendText(target, `Cron deleted: ${job.id} (${job.label})`);
+              return;
+            }
+
+            case "move": {
+              if (restText.toLowerCase() !== "here") {
+                await this.telegram.sendText(target, "Usage: /cron move <id> here");
+                return;
+              }
+
+              const updated = await this.cronManager.updateJob(job, {
+                targetChatId: target.chatId,
+                targetThreadId: target.threadId
+              });
+              await this.telegram.sendText(target, `Cron moved: ${updated.id} now targets ${updated.targetChatId}:${updated.targetThreadId ?? "none"}`);
+              return;
+            }
+
+            case "context": {
+              if (!restText) {
+                await this.telegram.sendText(target, "Usage: /cron context <id> <slug-or-path>");
+                return;
+              }
+
+              const updated = await this.cronManager.updateJob(job, {
+                executionContextSlug: this.cronManager.requireContextReference(restText).slug
+              });
+              await this.telegram.sendText(target, `Cron context updated: ${updated.id} -> ${updated.executionContextSlug || "none"}`);
+              return;
+            }
+
+            case "mode": {
+              if (!restText) {
+                await this.telegram.sendText(target, "Usage: /cron mode <id> [fast|normal|max|clear]");
+                return;
+              }
+
+              const normalized = restText.toLowerCase();
+              const updated =
+                normalized === "clear" || normalized === "default" || normalized === "reset"
+                  ? await this.cronManager.updateJob(job, {
+                      modelOverride: null,
+                      reasoningEffortOverride: null
+                    })
+                  : await this.cronManager.updateJob(job, (() => {
+                      const preset = parseCodexModePreset(restText);
+                      if (!preset) {
+                        throw new Error("Usage: /cron mode <id> [fast|normal|max|clear]");
+                      }
+
+                      return {
+                        modelOverride: preset.modelOverride,
+                        reasoningEffortOverride: preset.reasoningEffortOverride
+                      };
+                    })());
+
+              await this.telegram.sendText(target, `Cron mode updated: ${updated.id} (${updated.label})`);
+              return;
+            }
+
+            case "model": {
+              if (!restText) {
+                await this.telegram.sendText(target, "Usage: /cron model <id> [model-id|clear]");
+                return;
+              }
+
+              const normalized = restText.toLowerCase();
+              const updated = await this.cronManager.updateJob(job, {
+                modelOverride:
+                  normalized === "clear" || normalized === "default" || normalized === "reset"
+                    ? null
+                    : normalizeCodexModelOverride(restText)
+              });
+              await this.telegram.sendText(target, `Cron model updated: ${updated.id} (${updated.label})`);
+              return;
+            }
+
+            case "effort": {
+              if (!restText) {
+                await this.telegram.sendText(target, "Usage: /cron effort <id> [low|medium|high|xhigh|clear]");
+                return;
+              }
+
+              const normalized = restText.toLowerCase();
+              const nextEffort =
+                normalized === "clear" || normalized === "default" || normalized === "reset"
+                  ? null
+                  : parseCodexReasoningEffort(restText);
+
+              if (normalized !== "clear" && normalized !== "default" && normalized !== "reset" && !nextEffort) {
+                await this.telegram.sendText(target, "Usage: /cron effort <id> [low|medium|high|xhigh|clear]");
+                return;
+              }
+
+              const updated = await this.cronManager.updateJob(job, {
+                reasoningEffortOverride: nextEffort
+              });
+              await this.telegram.sendText(target, `Cron effort updated: ${updated.id} (${updated.label})`);
+              return;
+            }
+
+            default:
+              await this.telegram.sendText(target, `Unknown /cron subcommand: ${subcommand}`);
+              return;
+          }
         }
 
         case "/mode": {
@@ -685,12 +870,23 @@ export class CommandHandler {
   }
 
   private formatContextStatus(context: ContextRecord): string {
+    const cronCount = this.cronManager.listRelevantJobs(
+      context,
+      context.telegramChatId === null
+        ? null
+        : {
+            chatId: context.telegramChatId,
+            threadId: context.telegramThreadId
+          }
+    ).length;
+
     return [
       `Context: ${context.slug}`,
       `Machine: ${context.machine}`,
       `Kind: ${context.kind}`,
       `State: ${context.state}`,
       `Busy: ${this.dispatcher.isActive(context.slug) ? "yes" : "no"}`,
+      `Crons: ${cronCount}`,
       `Transport: ${context.transport || "n/a"}`,
       `Target: ${context.target}`,
       `Root: ${context.rootPath}`,
@@ -758,5 +954,20 @@ export class CommandHandler {
       path: entry.path,
       type: null
     }));
+  }
+
+  private formatCronSchedule(job: CronJobRecord): string {
+    switch (job.schedule.type) {
+      case "once":
+        return `once at ${job.schedule.at}`;
+      case "daily":
+        return `daily at ${job.schedule.time} ${job.schedule.timezone}`;
+      case "weekly":
+        return `every ${job.schedule.weekday} at ${job.schedule.time} ${job.schedule.timezone}`;
+      case "monthly":
+        return `day ${job.schedule.dayOfMonth} monthly at ${job.schedule.time} ${job.schedule.timezone}`;
+      case "interval":
+        return `every ${job.schedule.everyMinutes} minute(s) from ${job.schedule.anchorAt}`;
+    }
   }
 }

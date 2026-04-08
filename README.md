@@ -1,8 +1,8 @@
-# Private Dev Factory
+# Clawdex
 
-Telegram-driven Codex control plane for `valkyrie`, with `erbine` as an optional remote worker.
+Telegram-driven Codex control plane for one control host, with optional remote workers.
 
-Phase 1 is intentionally usable without `erbine`. `host` and `scratch` topics can run locally on `valkyrie` today, while `erbine` contexts can exist in `pending` state until SSH is ready.
+Phase 1 is intentionally usable without a remote worker. `host` and `scratch` topics can run locally on the control machine today, while remote contexts can exist in `pending` state until SSH is ready.
 
 ## Quickstart
 
@@ -14,6 +14,8 @@ Phase 1 is intentionally usable without `erbine`. `host` and `scratch` topics ca
 6. Open `http://127.0.0.1:8787/`.
 
 If you want the worker file somewhere else, set `FACTORY_WORKERS_FILE` in `.env`.
+
+For a fresh-machine bootstrap, including passwordless sudo for the control user, a one-shot Codex dotfile bootstrap, and a permanent Codex `approval_policy = "never"` / `sandbox_mode = "danger-full-access"` setup, start with [docs/fresh-machine-bootstrap.md](./docs/fresh-machine-bootstrap.md).
 
 ## Core behaviors
 
@@ -28,6 +30,9 @@ If you want the worker file somewhere else, set `FACTORY_WORKERS_FILE` in `.env`
 - Images are also forwarded to Codex with `--image` for faster visual response; non-image files are staged on disk and referenced by path in the prompt.
 - Audio/voice-only Telegram messages are intentionally not forwarded to Codex yet; they are reserved for the later transcription phase.
 - While a job is active, the bot sends a lightweight `typing` heartbeat into the same Telegram topic so long runs do not look stalled.
+- Scheduled jobs live inside `telemux.service`, not OS cron. The scheduler checks the SQLite job registry on an interval and can proactively post into a Telegram topic even when no one is actively chatting there.
+- Scheduled jobs can either send a direct reminder into Telegram or run Codex against a stored context/session and post the result back into the bound topic.
+- Scheduled jobs have their own optional model/effort overrides. Effective runtime is `cron override -> context override -> global default`.
 - `host` and `scratch` contexts auto-create lightweight local git repos so Codex always has a safe working directory.
 - Managed `host` and `scratch` workspaces get an initial commit so `git status` and future diffs start clean.
 - `repo` contexts can bind an existing repo path or clone a git URL into a managed repo root.
@@ -39,6 +44,7 @@ Default paths:
 
 - control-plane DB: `/srv/telemux/db.sqlite`
 - control-plane context snapshots: `/srv/telemux/contexts/<slug>/context.json`
+- control-plane cron snapshots: `/srv/telemux/crons/<job-id>.json`
 - control-plane logs: `/srv/telemux/logs/`
 - managed repos: `/srv/factory/repos/`
 - managed host contexts: `/srv/factory/hostctx/<slug>/`
@@ -46,7 +52,11 @@ Default paths:
 
 Inside each managed workspace, durable state lives in `.factory/STATE.json`, `.factory/SUMMARY.md`, `.factory/TODO.md`, and `.factory/ARTIFACTS.md`.
 
+When a context has scheduled jobs linked to it or to its bound Telegram topic, the control plane mirrors them into `.factory/CRONS.md`.
+
 When Telegram file delivery is requested, the control plane also checks for the ephemeral file `.factory/TELEGRAM_ATTACHMENTS.json` after a Codex run. That file is not durable context state; it is a one-run upload manifest for Telegram only.
+
+When a user asks in plain language to create, change, move, pause, resume, or delete a scheduled job, Codex can emit the ephemeral control-plane manifest `.factory/CRON_REQUESTS.json` after the turn. The control plane validates and applies those requested cron changes after the normal reply is sent.
 
 ## Commands
 
@@ -56,6 +66,8 @@ When Telegram file delivery is requested, the control plane also checks for the 
 - `/synccommands`
 - `/showcommands`
 - `/workers`
+- `/crons`
+- `/cron <subcommand>`
 - `/mode [fast|normal|max|clear]`
 - `/model [model-id|clear]`
 - `/effort [low|medium|high|xhigh|clear]`
@@ -73,17 +85,29 @@ When Telegram file delivery is requested, the control plane also checks for the 
 
 `/status` is kept as an alias for `/topicinfo`.
 
+`/cron` subcommands currently include:
+
+- `show <id>`
+- `pause <id>`
+- `resume <id>`
+- `delete <id>`
+- `move <id> here`
+- `context <id> <slug-or-path>`
+- `mode <id> [fast|normal|max|clear]`
+- `model <id> [model-id|clear]`
+- `effort <id> [low|medium|high|xhigh|clear]`
+
 ## Topic patterns
 
-- `valkyrie-general`
-  `/newctx valkyrie-general valkyrie host`
-- `erbine-general`
-  `/newctx erbine-general erbine host`
+- `control-general`
+  `/newctx control-general control host`
+- `worker-general`
+  `/newctx worker-general worker1 host`
 - `Project: bitfalls-dashboard`
-  `/newctx bitfalls-dashboard erbine https://github.com/bitfalls/dashboard.git master`
-  or `/newctx bitfalls-dashboard valkyrie /absolute/path/to/repo`
+  `/newctx bitfalls-dashboard worker1 https://github.com/example/project.git master`
+  or `/newctx bitfalls-dashboard control /absolute/path/to/repo`
 - `Scratchpad`
-  `/newctx scratchpad valkyrie scratch`
+  `/newctx scratchpad control scratch`
 
 After a topic is bound, plain text behaves like chatting to Codex in that topic.
 
@@ -94,6 +118,10 @@ Use `/mode`, `/model`, and `/effort` to change the Codex runtime for just that t
 - `max` -> `gpt-5.4` with `xhigh`
 
 Captioned image and file messages work in the same bound-topic flow. The control plane stages the inbound files into the workspace first, then runs Codex against that updated workspace.
+
+Scheduled jobs can be created either by normal conversation in a bound topic, where Codex writes `.factory/CRON_REQUESTS.json`, or by deterministic job-management commands like `/crons` and `/cron ...`.
+
+One-off reminders do not invoke Codex when they fire. Scheduled Codex jobs do, and they reuse the stored context session so proactive thread messages stay in-context.
 
 If Codex records a real file in `.factory/ARTIFACTS.md` and the user explicitly asks for that file to be sent into Telegram, the control plane can upload it into the same topic instead of replying with a path only.
 
@@ -125,8 +153,8 @@ If Codex records a real file in `.factory/ARTIFACTS.md` and the user explicitly 
 
 Recommended phase-1 automation path:
 
-- run `sshd` on `erbine`
-- connect from `valkyrie` with normal OpenSSH over the Tailscale network
+- run `sshd` on the remote worker
+- connect from the control host with normal OpenSSH over the Tailscale network
 - authenticate with a normal SSH key or other non-interactive SSH auth
 
 `tailscale-ssh` remains available as an optional transport, but it is not the default automation path.
@@ -135,4 +163,6 @@ Recommended phase-1 automation path:
 
 - [docs/architecture.md](./docs/architecture.md)
 - [docs/operations.md](./docs/operations.md)
+- [docs/fresh-machine-bootstrap.md](./docs/fresh-machine-bootstrap.md)
+- [docs/publication-readiness.md](./docs/publication-readiness.md)
 - [NEXT_STEPS.md](./NEXT_STEPS.md)

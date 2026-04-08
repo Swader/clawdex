@@ -2,8 +2,10 @@
 
 ## Install or refresh
 
+If you are starting from a blank machine, read [docs/fresh-machine-bootstrap.md](./fresh-machine-bootstrap.md) first. That document includes the OS user, passwordless sudo, Codex config, and Telegram onboarding steps needed to reproduce the current control-plane setup.
+
 ```bash
-cd ~/private-dev-factory
+cd ~/clawdex
 cp -n .env.example .env
 cp -n workers.example.json workers.json
 $EDITOR .env workers.json
@@ -19,33 +21,33 @@ If you want startup-time `chat_member` command registration for the control supe
 
 Recommended worker config for phase 1:
 
-- `valkyrie` uses `transport: "local"`
-- `erbine` uses `transport: "ssh"` over the Tailscale network
+- `control` uses `transport: "local"`
+- `worker1` uses `transport: "ssh"` over the Tailscale network
 
-## Repo push access
+## Optional Git remote setup
 
-This checkout can use a dedicated GitHub deploy key for pushes to `Swader/valkyrie` without changing the identity used by other repos on the machine.
+If you want this checkout to push to a dedicated GitHub repository without changing the identity used by other repos on the machine, create a dedicated deploy key and SSH host alias for this repo only.
 
-- private key: `~/.ssh/private-dev-factory_github_deploy`
-- public key: `~/.ssh/private-dev-factory_github_deploy.pub`
-- SSH host alias: `github.com-private-dev-factory`
+- private key: `~/.ssh/clawdex_github_deploy`
+- public key: `~/.ssh/clawdex_github_deploy.pub`
+- SSH host alias: `github.com-clawdex`
 
 With this setup, the repo remote can be:
 
 ```bash
-git@github.com-private-dev-factory:Swader/valkyrie.git
+git@github.com-clawdex:swader/clawdex.git
 ```
 
 Paste the public key into the GitHub repo at:
 
-- `Swader/valkyrie` -> `Settings` -> `Deploy keys`
+- `swader/clawdex` -> `Settings` -> `Deploy keys`
 
 Enable write access if the key should be allowed to push.
 
 ## Day 0 Telegram onboarding
 
 1. Create or recover the bot token from `@BotFather`.
-2. Put the token in `~/private-dev-factory/.env` as `FACTORY_TELEGRAM_BOT_TOKEN=...`.
+2. Put the token in `~/clawdex/.env` as `FACTORY_TELEGRAM_BOT_TOKEN=...`.
 3. Add the bot to the target supergroup.
 4. Ensure forum topics are enabled in the supergroup.
 5. Disable bot privacy in `@BotFather` so plain text and media captions inside a bound topic reach the bot.
@@ -53,17 +55,17 @@ Enable write access if the key should be allowed to push.
 
 ## Common topic setups
 
-### Valkyrie general host context
+### Control host context
 
-In the `valkyrie-general` topic:
+In the `control-general` topic:
 
 ```text
-/newctx valkyrie-general valkyrie host
+/newctx control-general control host
 ```
 
 That creates a managed local git workspace under:
 
-- `/srv/factory/hostctx/valkyrie-general/`
+- `/srv/factory/hostctx/control-general/`
 - an initial git commit so future diffs start clean
 
 ### Scratchpad
@@ -71,7 +73,7 @@ That creates a managed local git workspace under:
 In a throwaway topic:
 
 ```text
-/newctx scratchpad valkyrie scratch
+/newctx scratchpad control scratch
 ```
 
 That creates:
@@ -82,16 +84,16 @@ That creates:
 ### Existing repo path
 
 ```text
-/newctx bitfalls-dashboard valkyrie /absolute/path/to/repo
+/newctx bitfalls-dashboard control /absolute/path/to/repo
 ```
 
 ### Managed clone from a git URL
 
 ```text
-/newctx bitfalls-dashboard erbine https://github.com/example/project.git master
+/newctx bitfalls-dashboard worker1 https://github.com/example/project.git master
 ```
 
-If `erbine` is unavailable, the context is still created and stored as `pending`.
+If the remote worker is unavailable, the context is still created and stored as `pending`.
 
 ## Using the bot
 
@@ -104,6 +106,8 @@ If `erbine` is unavailable, the context is still created and stored as `pending`
 /showcommands
 /whoami
 /topicinfo
+/crons
+/cron show <id>
 /mode
 /model
 /effort
@@ -146,6 +150,25 @@ Preset meanings:
 
 These overrides are stored with the bound context and applied to both `codex exec` and `codex exec resume`, so the session continues instead of starting over.
 
+Scheduled jobs are available too:
+
+```text
+/crons
+/cron show <id>
+/cron pause <id>
+/cron resume <id>
+/cron delete <id>
+/cron move <id> here
+/cron context <id> <slug-or-path>
+/cron mode <id> fast
+/cron model <id> gpt-5.4-mini
+/cron effort <id> low
+```
+
+Natural-language scheduling works inside a bound topic as well. The normal Codex turn can now emit a control-plane cron manifest after messages like “remind me to implement Stripe every Monday at 09:00” or “change mode to fast for the email cron”.
+
+When a context has scheduled jobs linked to it or to its bound topic, the control plane mirrors them into `.factory/CRONS.md` inside the workspace.
+
 Captioned image or file messages use the same path. Supported inbound Telegram media is staged into the bound workspace before Codex runs. Images are also attached to the Codex prompt with `--image`, while non-image files are left on disk for Codex to inspect.
 
 Audio and voice-only Telegram messages are intentionally blocked before Codex in the current phase. They need transcription first.
@@ -162,8 +185,8 @@ Audio and voice-only Telegram messages are intentionally blocked before Codex in
 ### Rebind the current topic
 
 ```text
-/bind valkyrie scratch
-/bind erbine https://github.com/example/project.git master
+/bind control scratch
+/bind worker1 https://github.com/example/project.git master
 ```
 
 Legacy `/bind <slug>` is still accepted to attach the topic to an existing stored context.
@@ -191,6 +214,8 @@ If a Codex reply says a file was created and recorded in `.factory/ARTIFACTS.md`
 
 While a job is running, the bot should show a `typing...` indicator in the same topic. That is expected while `/topicinfo` reports `Busy: yes`.
 
+For scheduled Codex jobs, if the target context is already busy, the scheduler keeps one pending run and dispatches it when the context becomes idle instead of starting a second concurrent session on the same workspace.
+
 ## Dashboard
 
 - Main page: `http://127.0.0.1:8787/`
@@ -203,7 +228,7 @@ The dashboard stays localhost-only by default.
 - Telegram bot commands are scoped by chat/user, not by topic.
 - Group topics do not have their own separate command scopes.
 - The daemon registers commands for:
-  `default`, `all_private_chats`, `all_group_chats`, and optionally `chat_member(chat_id=<control-group>, user_id=16708526)`.
+  `default`, `all_private_chats`, `all_group_chats`, and optionally `chat_member(chat_id=<control-group>, user_id=<allowed-telegram-user-id>)`.
 - Telegram clients may still choose not to visually show slash suggestions in some group contexts even when commands are registered correctly.
 - Use `/synccommands` to re-register commands and `/showcommands` to inspect what Telegram currently returns for each scope.
 - This is separate from any private-chat menu button behavior; group-topic slash suggestions are not fixed with `setChatMenuButton`.
@@ -216,7 +241,9 @@ systemctl --user restart telemux.service
 journalctl --user -u telemux.service -f
 ```
 
-After changing the control plane source under `~/private-dev-factory/src`, restart `telemux.service` because the unit runs directly from `bun run src/main.ts`.
+After changing the control plane source under `~/clawdex/src`, restart `telemux.service` because the unit runs directly from `bun run src/main.ts`.
+
+The internal scheduler lives in the same service. There is no separate OS cron or timer to restart.
 
 ## Boot readiness
 
@@ -232,7 +259,7 @@ After changing the control plane source under `~/private-dev-factory/src`, resta
 - Run `/workers`
 - Confirm the worker shows `status=unreachable` instead of crashing the daemon
 - Confirm the SSH target and user in `workers.json`
-- Confirm Tailscale networking between `valkyrie` and `erbine`
+- Confirm Tailscale networking between the control host and the remote worker
 - Confirm `sshd`, `git`, `bash`, and `codex` exist on the worker
 
 If the worker is unavailable, context creation should land in `pending`.
@@ -266,3 +293,10 @@ If the worker is unavailable, context creation should land in `pending`.
 - Confirm the topic is a real forum topic with a `message_thread_id`
 - Check `journalctl --user -u telemux.service -n 200 --no-pager` for `telegram typing heartbeat failed`
 - If replies still arrive normally, treat the missing indicator as a Telegram client/UI issue first
+
+### Scheduled job did not fire
+
+- Run `/crons` in the target topic and confirm the job is enabled with a valid `next=` value
+- Check the dashboard or `/cron show <id>` for `pending`, `last error`, and target/context mismatch
+- Check `journalctl --user -u telemux.service -n 200 --no-pager` for cron scheduler errors
+- Remember there is no downtime catch-up; jobs missed while the service was down are fast-forwarded to the next future occurrence

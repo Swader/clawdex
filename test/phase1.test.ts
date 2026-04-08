@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { CommandHandler } from "../src/commands";
 import { loadConfig, ensureProjectPaths } from "../src/config";
+import { CronManager } from "../src/cron-manager";
+import { CronScheduler } from "../src/cron-scheduler";
 import { ContextService } from "../src/contexts";
 import { FactoryDb } from "../src/db";
 import { Dispatcher } from "../src/dispatcher";
@@ -329,6 +331,18 @@ else
   printf '# Artifacts\\n\\n- artifact-turn-%s\\n' "$turns" > .factory/ARTIFACTS.md
 fi
 
+rm -f .factory/CRON_REQUESTS.json
+if printf '%s' "$prompt" | grep -qi 'remind me to implement stripe every monday at 09:00'; then
+  cat > .factory/CRON_REQUESTS.json <<'EOF'
+{"actions":[{"type":"create","job":{"label":"stripe-reminder","kind":"reminder","schedule":{"type":"weekly","weekday":"monday","time":"09:00","timezone":"Europe/Zagreb"},"reminderText":"Reminder: implement Stripe."}}]}
+EOF
+fi
+if printf '%s' "$prompt" | grep -qi 'change mode to fast for stripe cron'; then
+  cat > .factory/CRON_REQUESTS.json <<'EOF'
+{"actions":[{"type":"update","selector":{"label":"stripe-reminder"},"changes":{"modelOverride":"gpt-5.4-mini","reasoningEffortOverride":"low"}}]}
+EOF
+fi
+
 if [[ -n "$output_file" ]]; then
   printf 'Reply turn %s for %s.' "$turns" "$(basename "$PWD")" > "$output_file"
 fi
@@ -358,16 +372,16 @@ exit 255
     `${JSON.stringify(
       [
         {
-          name: "valkyrie",
+          name: "control",
           transport: "local",
           managedRepoRoot: resolve(factoryRoot, "repos"),
           managedHostRoot: resolve(factoryRoot, "hostctx"),
           managedScratchRoot: resolve(factoryRoot, "scratch")
         },
         {
-          name: "erbine",
+          name: "worker1",
           transport: "ssh",
-          sshTarget: "erbine.tailnet",
+          sshTarget: "worker1.tailnet",
           sshUser: "factory",
           managedRepoRoot: "/srv/factory/repos",
           managedHostRoot: "/srv/factory/hostctx",
@@ -386,7 +400,7 @@ exit 255
     ...process.env,
     FACTORY_CONTROL_ROOT: controlRoot,
     FACTORY_FACTORY_ROOT: factoryRoot,
-    FACTORY_LOCAL_MACHINE: "valkyrie",
+    FACTORY_LOCAL_MACHINE: "control",
     FACTORY_WORKERS_FILE: workersFile,
     FACTORY_CODEX_BIN: fakeCodex,
     FACTORY_TELEGRAM_BOT_TOKEN: "test-token",
@@ -399,8 +413,10 @@ exit 255
   const contexts = new ContextService(db, config.usageAdapter, config.contextsDir);
   const workers = new WorkerService(config, db);
   const telegram = new FakeTelegram();
-  const dispatcher = new Dispatcher(config, db, contexts, workers, telegram as never);
-  const commands = new CommandHandler(config, db, telegram as never, contexts, workers, dispatcher);
+  const cronManager = new CronManager(config, db, workers);
+  const dispatcher = new Dispatcher(config, db, contexts, workers, telegram as never, cronManager);
+  const commands = new CommandHandler(config, db, telegram as never, contexts, workers, dispatcher, cronManager);
+  const cronScheduler = new CronScheduler(config, db, cronManager, dispatcher, telegram as never);
 
   return {
     root,
@@ -408,6 +424,8 @@ exit 255
     factoryRoot,
     previousPath,
     db,
+    cronManager,
+    cronScheduler,
     dispatcher,
     workers,
     telegram,
@@ -428,6 +446,8 @@ test("phase 1 workflow covers local host/scratch and pending remote behavior", a
     expect(helpText).toContain("/mode [fast|normal|max|clear]");
     expect(helpText).toContain("/model [model-id|clear]");
     expect(helpText).toContain("/effort [low|medium|high|xhigh|clear]");
+    expect(helpText).toContain("/crons");
+    expect(helpText).toContain("/cron <subcommand>");
 
     await fixture.commands.handleMessage(telegramMessage("/whoami", 10));
     expect(fixture.telegram.sent.at(-1)?.text).toContain("Access: allowed");
@@ -435,17 +455,17 @@ test("phase 1 workflow covers local host/scratch and pending remote behavior", a
     expect(fixture.telegram.sent.at(-1)?.text).toContain("Thread id: 10");
     expect(fixture.telegram.sent.at(-1)?.text).toContain("Bound context: none");
 
-    await fixture.commands.handleMessage(telegramMessage("/newctx valkyrie-general valkyrie host", 10));
-    const valkyrieGeneral = fixture.db.getContextBySlug("valkyrie-general");
-    expect(valkyrieGeneral?.kind).toBe("host");
-    expect(valkyrieGeneral?.state).toBe("active");
-    expect(valkyrieGeneral?.transport).toBe("local");
-    expect(await Bun.file(join(fixture.factoryRoot, "hostctx", "valkyrie-general", ".git", "HEAD")).exists()).toBe(true);
-    expect(gitHasCommit(join(fixture.factoryRoot, "hostctx", "valkyrie-general"))).toBe(true);
+    await fixture.commands.handleMessage(telegramMessage("/newctx control-general control host", 10));
+    const controlGeneral = fixture.db.getContextBySlug("control-general");
+    expect(controlGeneral?.kind).toBe("host");
+    expect(controlGeneral?.state).toBe("active");
+    expect(controlGeneral?.transport).toBe("local");
+    expect(await Bun.file(join(fixture.factoryRoot, "hostctx", "control-general", ".git", "HEAD")).exists()).toBe(true);
+    expect(gitHasCommit(join(fixture.factoryRoot, "hostctx", "control-general"))).toBe(true);
 
     await fixture.commands.handleMessage(telegramMessage("/explainctx", 10));
     const explainText = fixture.telegram.sent.at(-1)?.text || "";
-    expect(explainText).toContain("Machine: valkyrie");
+    expect(explainText).toContain("Machine: control");
     expect(explainText).toContain("Kind: host");
     expect(explainText).toContain("Transport: local");
     expect(explainText).toContain("Codex session exists: no");
@@ -453,17 +473,17 @@ test("phase 1 workflow covers local host/scratch and pending remote behavior", a
     expect(explainText).toContain("Old Telegram messages stay in Telegram");
 
     await fixture.commands.handleMessage(telegramMessage("Check free disk space and leave a note.", 10));
-    await waitFor(() => Boolean(fixture.db.getContextBySlug("valkyrie-general")?.codexSessionId));
-    const firstSession = fixture.db.getContextBySlug("valkyrie-general")?.codexSessionId || "";
-    await waitFor(() => fixture.telegram.sent.some((entry) => entry.text.includes("Reply turn 1 for valkyrie-general.")));
+    await waitFor(() => Boolean(fixture.db.getContextBySlug("control-general")?.codexSessionId));
+    const firstSession = fixture.db.getContextBySlug("control-general")?.codexSessionId || "";
+    await waitFor(() => fixture.telegram.sent.some((entry) => entry.text.includes("Reply turn 1 for control-general.")));
     expect(firstSession).not.toBe("");
-    expect(fixture.telegram.sent.some((entry) => entry.text.includes("Reply turn 1 for valkyrie-general."))).toBe(true);
+    expect(fixture.telegram.sent.some((entry) => entry.text.includes("Reply turn 1 for control-general."))).toBe(true);
 
     await fixture.commands.handleMessage(telegramMessage("Continue the same topic.", 10));
-    await waitFor(() => fixture.telegram.sent.some((entry) => entry.text.includes("Reply turn 2 for valkyrie-general.")));
-    expect(fixture.db.getContextBySlug("valkyrie-general")?.codexSessionId).toBe(firstSession);
+    await waitFor(() => fixture.telegram.sent.some((entry) => entry.text.includes("Reply turn 2 for control-general.")));
+    expect(fixture.db.getContextBySlug("control-general")?.codexSessionId).toBe(firstSession);
 
-    await fixture.commands.handleMessage(telegramMessage("/newctx scratchpad valkyrie scratch", 20));
+    await fixture.commands.handleMessage(telegramMessage("/newctx scratchpad control scratch", 20));
     const scratchpad = fixture.db.getContextBySlug("scratchpad");
     expect(scratchpad?.kind).toBe("scratch");
     expect(scratchpad?.state).toBe("active");
@@ -473,17 +493,17 @@ test("phase 1 workflow covers local host/scratch and pending remote behavior", a
     await fixture.commands.handleMessage(telegramMessage("Do some scratch work.", 20));
     await waitFor(() => Boolean(fixture.db.getContextBySlug("scratchpad")?.codexSessionId));
 
-    await fixture.commands.handleMessage(telegramMessage("/newctx rebound valkyrie scratch", 10));
+    await fixture.commands.handleMessage(telegramMessage("/newctx rebound control scratch", 10));
     const reboundText = fixture.telegram.sent.at(-1)?.text || "";
     expect(reboundText).toContain("Warning: this topic is already bound.");
-    expect(reboundText).toContain("Currently bound: valkyrie-general");
+    expect(reboundText).toContain("Currently bound: control-general");
     expect(reboundText).toContain("Rebinding changes future routing for this Telegram topic.");
     expect(reboundText).toContain("The old workspace stays on disk");
     expect(reboundText).toContain("Old Telegram messages stay in Telegram");
     expect(fixture.db.getContextByTopic(4242, 10)?.slug).toBe("rebound");
-    expect(await Bun.file(join(fixture.factoryRoot, "hostctx", "valkyrie-general", ".git", "HEAD")).exists()).toBe(true);
+    expect(await Bun.file(join(fixture.factoryRoot, "hostctx", "control-general", ".git", "HEAD")).exists()).toBe(true);
 
-    await fixture.commands.handleMessage(telegramMessage("/newctx live-session valkyrie scratch", 50));
+    await fixture.commands.handleMessage(telegramMessage("/newctx live-session control scratch", 50));
     await fixture.commands.handleMessage(telegramMessage("/run slow live session test", 50));
     await waitFor(() => Boolean(fixture.db.getContextBySlug("live-session")?.codexSessionId) && fixture.dispatcher.isActive("live-session"));
     const liveSessionId = fixture.db.getContextBySlug("live-session")?.codexSessionId || "";
@@ -496,37 +516,37 @@ test("phase 1 workflow covers local host/scratch and pending remote behavior", a
     );
     await waitFor(() => fixture.telegram.sent.some((entry) => entry.text.includes("Reply turn 1 for live-session.")));
 
-    await fixture.commands.handleMessage(telegramMessage("/newctx erbine-general erbine host", 30));
-    const erbineGeneral = fixture.db.getContextBySlug("erbine-general");
-    expect(erbineGeneral?.kind).toBe("host");
-    expect(erbineGeneral?.state).toBe("pending");
-    expect(erbineGeneral?.lastError).toContain("No route to host");
+    await fixture.commands.handleMessage(telegramMessage("/newctx worker-general worker1 host", 30));
+    const workerGeneral = fixture.db.getContextBySlug("worker-general");
+    expect(workerGeneral?.kind).toBe("host");
+    expect(workerGeneral?.state).toBe("pending");
+    expect(workerGeneral?.lastError).toContain("No route to host");
 
     await fixture.commands.handleMessage(telegramMessage("/workers", 30));
     const workersText = fixture.telegram.sent.at(-1)?.text || "";
-    expect(workersText).toContain("erbine");
+    expect(workersText).toContain("worker1");
     expect(workersText).toContain("status=unreachable");
     expect(workersText).toContain("transport=ssh");
     expect(workersText).toContain("local=no");
 
     await fixture.commands.handleMessage(
-      telegramMessage("/newctx myproj erbine https://example.com/acme/project.git", 40)
+      telegramMessage("/newctx myproj worker1 https://example.com/acme/project.git", 40)
     );
-    const erbineRepo = fixture.db.getContextBySlug("myproj");
-    expect(erbineRepo?.kind).toBe("repo");
-    expect(erbineRepo?.state).toBe("pending");
-    expect(erbineRepo?.transport).toBe("ssh");
-    expect(erbineRepo?.rootPath).toBe("/srv/factory/repos/myproj");
+    const workerRepo = fixture.db.getContextBySlug("myproj");
+    expect(workerRepo?.kind).toBe("repo");
+    expect(workerRepo?.state).toBe("pending");
+    expect(workerRepo?.transport).toBe("ssh");
+    expect(workerRepo?.rootPath).toBe("/srv/factory/repos/myproj");
 
-    expect(await Bun.file(join(fixture.factoryRoot, "hostctx", "valkyrie-general", ".factory", "SUMMARY.md")).exists()).toBe(
+    expect(await Bun.file(join(fixture.factoryRoot, "hostctx", "control-general", ".factory", "SUMMARY.md")).exists()).toBe(
       true
     );
-    expect(await Bun.file(join(fixture.factoryRoot, "hostctx", "valkyrie-general", ".factory", "STATE.json")).exists()).toBe(
+    expect(await Bun.file(join(fixture.factoryRoot, "hostctx", "control-general", ".factory", "STATE.json")).exists()).toBe(
       true
     );
     expect(await Bun.file(join(fixture.factoryRoot, "scratch", "scratchpad", ".factory", "SUMMARY.md")).exists()).toBe(true);
-    expect(await readFile(join(fixture.factoryRoot, "hostctx", "valkyrie-general", ".factory", "SUMMARY.md"), "utf8")).toContain(
-      "Turn 2 for valkyrie-general."
+    expect(await readFile(join(fixture.factoryRoot, "hostctx", "control-general", ".factory", "SUMMARY.md"), "utf8")).toContain(
+      "Turn 2 for control-general."
     );
 
     await fixture.commands.handleMessage(telegramMessage("/run send-file", 10));
@@ -545,11 +565,98 @@ test("phase 1 workflow covers local host/scratch and pending remote behavior", a
   }
 }, 15_000);
 
+test("cron jobs can be created from a normal Codex turn, tuned later, mirrored into the workspace, and dispatched by the scheduler", async () => {
+  const fixture = await createFixture();
+
+  try {
+    await fixture.commands.handleMessage(telegramMessage("/newctx cronlab control scratch", 80));
+    await fixture.commands.handleMessage(telegramMessage("Remind me to implement Stripe every Monday at 09:00 Europe/Zagreb.", 80));
+    await waitFor(() => fixture.db.listCronJobs().length === 1);
+
+    const created = fixture.db.listCronJobs()[0];
+    expect(created?.label).toBe("stripe-reminder");
+    expect(created?.kind).toBe("reminder");
+    expect(created?.executionContextSlug).toBe("cronlab");
+    expect(created?.targetThreadId).toBe(80);
+    expect(created?.nextRunAt).not.toBeNull();
+
+    const cronRoot = join(fixture.factoryRoot, "scratch", "cronlab");
+    await waitFor(() => Bun.file(join(cronRoot, ".factory", "CRONS.md")).exists());
+    expect(await readFile(join(cronRoot, ".factory", "CRONS.md"), "utf8")).toContain("stripe-reminder");
+
+    await fixture.commands.handleMessage(telegramMessage("/crons", 80));
+    expect(fixture.telegram.sent.at(-1)?.text).toContain("stripe-reminder");
+
+    await fixture.commands.handleMessage(telegramMessage("Change mode to fast for stripe cron.", 80));
+    await waitFor(() => fixture.db.listCronJobs()[0]?.modelOverride === "gpt-5.4-mini");
+    expect(fixture.db.listCronJobs()[0]?.reasoningEffortOverride).toBe("low");
+    await fixture.cronScheduler.runDueJobs("2026-04-06T00:00:00.000Z");
+
+    const dueReminder = fixture.db.listCronJobs()[0];
+    await fixture.cronManager.saveJob({
+      ...dueReminder,
+      nextRunAt: "2026-04-07T07:00:00.000Z",
+      updatedAt: "2026-04-07T07:00:00.000Z"
+    });
+
+    await fixture.cronScheduler.runDueJobs("2026-04-08T07:00:00.000Z");
+    await waitFor(() =>
+      fixture.telegram.sent.some((entry) => entry.target.threadId === 80 && entry.text.includes("Reminder: implement Stripe."))
+    );
+
+    const refreshedReminder = fixture.db.getCronJob(dueReminder.id);
+    expect(refreshedReminder?.lastRunAt).not.toBeNull();
+    expect(refreshedReminder?.nextRunAt).not.toBeNull();
+
+    const codexJob = await fixture.cronManager.createJob(
+      {
+        label: "email-cron",
+        kind: "codex",
+        schedule: {
+          type: "interval",
+          everyMinutes: 60,
+          anchorAt: "2026-04-08T06:00:00.000Z"
+        },
+        executionContextSlug: "cronlab",
+        targetChatId: 4242,
+        targetThreadId: 80,
+        instruction: "Check the inbox and summarize anything urgent.",
+        modelOverride: "gpt-5.4-mini",
+        reasoningEffortOverride: "low"
+      },
+      {
+        context: fixture.db.getContextBySlug("cronlab"),
+        target: { chatId: 4242, threadId: 80 }
+      }
+    );
+
+    await fixture.cronManager.saveJob({
+      ...codexJob,
+      nextRunAt: "2026-04-08T07:00:00.000Z",
+      updatedAt: "2026-04-08T07:00:00.000Z"
+    });
+
+    await fixture.cronScheduler.runDueJobs("2026-04-08T08:00:00.000Z");
+    await waitFor(() => fixture.telegram.sent.some((entry) => entry.text.includes("Reply turn 3 for cronlab.")));
+
+    expect(await readFile(join(cronRoot, ".factory", "fake-model.txt"), "utf8")).toBe("gpt-5.4-mini");
+    expect(await readFile(join(cronRoot, ".factory", "fake-reasoning.txt"), "utf8")).toBe('model_reasoning_effort="low"');
+
+    await fixture.commands.handleMessage(telegramMessage("/crons", 80));
+    const cronsText = fixture.telegram.sent.at(-1)?.text || "";
+    expect(cronsText).toContain("stripe-reminder");
+    expect(cronsText).toContain("email-cron");
+  } finally {
+    process.env.PATH = fixture.previousPath;
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+}, 20_000);
+
 test("per-topic Codex mode, model, and effort overrides persist across resume without losing the session", async () => {
   const fixture = await createFixture();
 
   try {
-    await fixture.commands.handleMessage(telegramMessage("/newctx tuning valkyrie scratch", 70));
+    await fixture.commands.handleMessage(telegramMessage("/newctx tuning control scratch", 70));
 
     await fixture.commands.handleMessage(telegramMessage("/mode fast", 70));
     expect(fixture.telegram.sent.at(-1)?.text).toContain("Codex mode set to fast");
@@ -598,7 +705,7 @@ test("phase 1 inbound Telegram media stages files and only forwards images to Co
   const fixture = await createFixture();
 
   try {
-    await fixture.commands.handleMessage(telegramMessage("/newctx media valkyrie scratch", 60));
+    await fixture.commands.handleMessage(telegramMessage("/newctx media control scratch", 60));
     const mediaContext = fixture.db.getContextBySlug("media");
     expect(mediaContext?.kind).toBe("scratch");
 

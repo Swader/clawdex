@@ -361,6 +361,34 @@ fi
     return result.stdout.trim() || null;
   }
 
+  async writeWorkspaceFile(context: ContextRecord, relativePath: string, content: string): Promise<void> {
+    const worker = this.requireWorker(context.machine);
+    const safePath = cleanRelativePath(relativePath);
+    const encoded = Buffer.from(content, "utf8").toString("base64");
+    const marker = "__WORKSPACE_FILE_CONTENT__";
+    const script = `
+set -euo pipefail
+expand_home_path() {
+  case "$1" in
+    "~") printf '%s\\n' "$HOME" ;;
+    "~/"*) printf '%s/%s\\n' "$HOME" "\${1#~/}" ;;
+    *) printf '%s\\n' "$1" ;;
+  esac
+}
+
+cd "$(expand_home_path ${quoteSh(context.worktreePath)})"
+mkdir -p ${quoteSh(dirname(safePath))}
+cat <<'${marker}' | base64 -d > ${quoteSh(safePath)}
+${encoded}
+${marker}
+`;
+
+    const result = await this.runWorkerScript(worker, script, undefined, 10);
+    if (!result.ok) {
+      throw new Error(result.stderr.trim() || result.stdout.trim() || `exit ${result.exitCode}`);
+    }
+  }
+
   async readArtifactFile(context: ContextRecord, filePath: string, maxBytes = 45 * 1024 * 1024): Promise<WorkspaceArtifactFile> {
     const worker = this.requireWorker(context.machine);
     const script = `

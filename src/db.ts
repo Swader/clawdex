@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import type { CodexReasoningEffort } from "./codex-runtime";
+import { CronJobRecord, CronRunRecord, normalizeCronSchedule } from "./cron-jobs";
 
 export type ContextKind = "repo" | "host" | "scratch";
 export type ContextState = "active" | "pending" | "archived" | "error";
@@ -130,6 +131,48 @@ function rowToWorker(row: Record<string, unknown>): WorkerRecord {
   };
 }
 
+function rowToCronJob(row: Record<string, unknown>): CronJobRecord {
+  const scheduleText = readNullableString(row, "schedule_json");
+  if (!scheduleText) {
+    throw new Error(`cron job ${String(row.id)} is missing schedule_json`);
+  }
+
+  return {
+    id: String(row.id),
+    label: String(row.label),
+    kind: String(row.kind) === "codex" ? "codex" : "reminder",
+    enabled: Boolean(Number(row.enabled ?? 1)),
+    schedule: normalizeCronSchedule(JSON.parse(scheduleText)),
+    nextRunAt: readNullableString(row, "next_run_at"),
+    pendingRunAt: readNullableString(row, "pending_run_at"),
+    lastRunAt: readNullableString(row, "last_run_at"),
+    lastScheduledFor: readNullableString(row, "last_scheduled_for"),
+    executionContextSlug: readNullableString(row, "execution_context_slug"),
+    targetChatId: Number(row.target_chat_id),
+    targetThreadId: readNullableNumber(row, "target_thread_id"),
+    instruction: readNullableString(row, "instruction"),
+    reminderText: readNullableString(row, "reminder_text"),
+    modelOverride: readNullableString(row, "codex_model_override"),
+    reasoningEffortOverride: (readNullableString(row, "codex_reasoning_effort") as CodexReasoningEffort | null) || null,
+    lastResult: readNullableString(row, "last_result"),
+    lastError: readNullableString(row, "last_error"),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at)
+  };
+}
+
+function rowToCronRun(row: Record<string, unknown>): CronRunRecord {
+  return {
+    id: String(row.id),
+    jobId: String(row.job_id),
+    scheduledFor: readNullableString(row, "scheduled_for"),
+    startedAt: String(row.started_at),
+    finishedAt: readNullableString(row, "finished_at"),
+    status: String(row.status) as CronRunRecord["status"],
+    note: readNullableString(row, "note")
+  };
+}
+
 export class FactoryDb {
   private readonly db: Database;
 
@@ -212,6 +255,52 @@ export class FactoryDb {
         value TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS cron_jobs (
+        id TEXT PRIMARY KEY,
+        label TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        schedule_json TEXT NOT NULL,
+        next_run_at TEXT,
+        pending_run_at TEXT,
+        last_run_at TEXT,
+        last_scheduled_for TEXT,
+        execution_context_slug TEXT,
+        target_chat_id INTEGER NOT NULL,
+        target_thread_id INTEGER,
+        instruction TEXT,
+        reminder_text TEXT,
+        codex_model_override TEXT,
+        codex_reasoning_effort TEXT,
+        last_result TEXT,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS cron_jobs_due_idx
+      ON cron_jobs(enabled, next_run_at, pending_run_at);
+
+      CREATE INDEX IF NOT EXISTS cron_jobs_context_idx
+      ON cron_jobs(execution_context_slug);
+
+      CREATE INDEX IF NOT EXISTS cron_jobs_target_idx
+      ON cron_jobs(target_chat_id, COALESCE(target_thread_id, -1));
+
+      CREATE TABLE IF NOT EXISTS cron_runs (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL,
+        scheduled_for TEXT,
+        started_at TEXT NOT NULL,
+        finished_at TEXT,
+        status TEXT NOT NULL,
+        note TEXT,
+        FOREIGN KEY(job_id) REFERENCES cron_jobs(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS cron_runs_job_idx
+      ON cron_runs(job_id, started_at DESC);
     `);
 
     this.ensureColumn("contexts", "machine", "machine TEXT");
@@ -422,6 +511,134 @@ export class FactoryDb {
   listWorkers(): WorkerRecord[] {
     const rows = this.db.query("SELECT * FROM workers ORDER BY host ASC").all() as Record<string, unknown>[];
     return rows.map(rowToWorker);
+  }
+
+  saveCronJob(job: CronJobRecord): CronJobRecord {
+    const updated = {
+      ...job,
+      createdAt: job.createdAt || nowIso(),
+      updatedAt: job.updatedAt || nowIso()
+    };
+
+    this.db
+      .query(`
+        INSERT INTO cron_jobs (
+          id, label, kind, enabled, schedule_json, next_run_at, pending_run_at, last_run_at, last_scheduled_for,
+          execution_context_slug, target_chat_id, target_thread_id, instruction, reminder_text,
+          codex_model_override, codex_reasoning_effort, last_result, last_error, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          label = excluded.label,
+          kind = excluded.kind,
+          enabled = excluded.enabled,
+          schedule_json = excluded.schedule_json,
+          next_run_at = excluded.next_run_at,
+          pending_run_at = excluded.pending_run_at,
+          last_run_at = excluded.last_run_at,
+          last_scheduled_for = excluded.last_scheduled_for,
+          execution_context_slug = excluded.execution_context_slug,
+          target_chat_id = excluded.target_chat_id,
+          target_thread_id = excluded.target_thread_id,
+          instruction = excluded.instruction,
+          reminder_text = excluded.reminder_text,
+          codex_model_override = excluded.codex_model_override,
+          codex_reasoning_effort = excluded.codex_reasoning_effort,
+          last_result = excluded.last_result,
+          last_error = excluded.last_error,
+          updated_at = excluded.updated_at
+      `)
+      .run(
+        updated.id,
+        updated.label,
+        updated.kind,
+        updated.enabled ? 1 : 0,
+        JSON.stringify(updated.schedule),
+        updated.nextRunAt,
+        updated.pendingRunAt,
+        updated.lastRunAt,
+        updated.lastScheduledFor,
+        updated.executionContextSlug,
+        updated.targetChatId,
+        updated.targetThreadId,
+        updated.instruction,
+        updated.reminderText,
+        updated.modelOverride,
+        updated.reasoningEffortOverride,
+        updated.lastResult,
+        updated.lastError,
+        updated.createdAt,
+        updated.updatedAt
+      );
+
+    return updated;
+  }
+
+  getCronJob(id: string): CronJobRecord | null {
+    const row = this.db.query("SELECT * FROM cron_jobs WHERE id = ?").get(id) as Record<string, unknown> | null;
+    return row ? rowToCronJob(row) : null;
+  }
+
+  listCronJobs(): CronJobRecord[] {
+    const rows = this.db.query("SELECT * FROM cron_jobs ORDER BY enabled DESC, updated_at DESC, id ASC").all() as Record<
+      string,
+      unknown
+    >[];
+    return rows.map(rowToCronJob);
+  }
+
+  listCronJobsForContext(slug: string): CronJobRecord[] {
+    const rows = this.db
+      .query("SELECT * FROM cron_jobs WHERE execution_context_slug = ? ORDER BY enabled DESC, updated_at DESC, id ASC")
+      .all(slug) as Record<string, unknown>[];
+    return rows.map(rowToCronJob);
+  }
+
+  listCronJobsForTarget(chatId: number, threadId: number | null): CronJobRecord[] {
+    const rows = this.db
+      .query(
+        "SELECT * FROM cron_jobs WHERE target_chat_id = ? AND COALESCE(target_thread_id, -1) = COALESCE(?, -1) ORDER BY enabled DESC, updated_at DESC, id ASC"
+      )
+      .all(chatId, threadId) as Record<string, unknown>[];
+    return rows.map(rowToCronJob);
+  }
+
+  listDueCronJobs(beforeIso: string): CronJobRecord[] {
+    const rows = this.db
+      .query(
+        "SELECT * FROM cron_jobs WHERE enabled = 1 AND (pending_run_at IS NOT NULL OR (next_run_at IS NOT NULL AND next_run_at <= ?)) ORDER BY COALESCE(pending_run_at, next_run_at) ASC, id ASC"
+      )
+      .all(beforeIso) as Record<string, unknown>[];
+    return rows.map(rowToCronJob);
+  }
+
+  deleteCronJob(id: string): void {
+    this.db.query("DELETE FROM cron_jobs WHERE id = ?").run(id);
+  }
+
+  saveCronRun(run: CronRunRecord): CronRunRecord {
+    this.db
+      .query(`
+        INSERT INTO cron_runs (
+          id, job_id, scheduled_for, started_at, finished_at, status, note
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          job_id = excluded.job_id,
+          scheduled_for = excluded.scheduled_for,
+          started_at = excluded.started_at,
+          finished_at = excluded.finished_at,
+          status = excluded.status,
+          note = excluded.note
+      `)
+      .run(run.id, run.jobId, run.scheduledFor, run.startedAt, run.finishedAt, run.status, run.note);
+
+    return run;
+  }
+
+  listCronRuns(jobId: string, limit = 20): CronRunRecord[] {
+    const rows = this.db
+      .query("SELECT * FROM cron_runs WHERE job_id = ? ORDER BY started_at DESC LIMIT ?")
+      .all(jobId, limit) as Record<string, unknown>[];
+    return rows.map(rowToCronRun);
   }
 
   getSetting(key: string): string | null {
