@@ -2,6 +2,8 @@ import { expect, test } from "bun:test";
 import type { FactoryConfig } from "../src/config";
 import { TELEGRAM_BOT_COMMANDS, TelegramBot } from "../src/telegram";
 
+const TEST_ALLOWED_TELEGRAM_USER_ID = 123456789;
+
 test("syncCommands registers and verifies commands for all configured scopes", async () => {
   const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
   const originalFetch = globalThis.fetch;
@@ -56,7 +58,7 @@ test("syncCommands registers and verifies commands for all configured scopes", a
       dashboardPort: 8787,
       telegramBotToken: "test-token",
       telegramControlChatId: -1001234567890,
-      allowedTelegramUserId: 16708526,
+      allowedTelegramUserId: TEST_ALLOWED_TELEGRAM_USER_ID,
       telegramPollTimeoutSeconds: 30,
       cronPollIntervalSeconds: 30,
       localMachine: "control",
@@ -73,7 +75,7 @@ test("syncCommands registers and verifies commands for all configured scopes", a
       "default",
       "all_private_chats",
       "all_group_chats",
-      "chat_member(-1001234567890,16708526)"
+      `chat_member(-1001234567890,${TEST_ALLOWED_TELEGRAM_USER_ID})`
     ]);
     expect(results.every((result) => result.setOk)).toBe(true);
     expect(results.every((result) => result.verifyOk)).toBe(true);
@@ -88,7 +90,7 @@ test("syncCommands registers and verifies commands for all configured scopes", a
       { type: "default" },
       { type: "all_private_chats" },
       { type: "all_group_chats" },
-      { type: "chat_member", chat_id: -1001234567890, user_id: 16708526 }
+      { type: "chat_member", chat_id: -1001234567890, user_id: TEST_ALLOWED_TELEGRAM_USER_ID }
     ]);
     expect(setCalls[0]?.body.commands).toEqual(
       TELEGRAM_BOT_COMMANDS.map((command) => ({
@@ -139,7 +141,7 @@ test("sendAttachment uploads multipart documents into the correct Telegram threa
       dashboardPort: 8787,
       telegramBotToken: "test-token",
       telegramControlChatId: -1001234567890,
-      allowedTelegramUserId: 16708526,
+      allowedTelegramUserId: TEST_ALLOWED_TELEGRAM_USER_ID,
       telegramPollTimeoutSeconds: 30,
       cronPollIntervalSeconds: 30,
       localMachine: "control",
@@ -213,7 +215,7 @@ test("sendChatAction targets the correct Telegram thread", async () => {
       dashboardPort: 8787,
       telegramBotToken: "test-token",
       telegramControlChatId: -1001234567890,
-      allowedTelegramUserId: 16708526,
+      allowedTelegramUserId: TEST_ALLOWED_TELEGRAM_USER_ID,
       telegramPollTimeoutSeconds: 30,
       cronPollIntervalSeconds: 30,
       localMachine: "control",
@@ -288,7 +290,7 @@ test("getFile requests Telegram file metadata and downloadFile fetches the file 
       dashboardPort: 8787,
       telegramBotToken: "test-token",
       telegramControlChatId: -1001234567890,
-      allowedTelegramUserId: 16708526,
+      allowedTelegramUserId: TEST_ALLOWED_TELEGRAM_USER_ID,
       telegramPollTimeoutSeconds: 30,
       cronPollIntervalSeconds: 30,
       localMachine: "control",

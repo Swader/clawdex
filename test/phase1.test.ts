@@ -90,8 +90,9 @@ class FakeTelegram {
 }
 
 let nextMessageId = 1;
+const TEST_ALLOWED_TELEGRAM_USER_ID = 123456789;
 
-function telegramMessage(text: string, threadId: number, userId = 16708526): TelegramMessage {
+function telegramMessage(text: string, threadId: number, userId = TEST_ALLOWED_TELEGRAM_USER_ID): TelegramMessage {
   return {
     message_id: nextMessageId++,
     date: Math.floor(Date.now() / 1000),
@@ -107,7 +108,12 @@ function telegramMessage(text: string, threadId: number, userId = 16708526): Tel
   };
 }
 
-function telegramPhotoMessage(caption: string, threadId: number, fileId: string, userId = 16708526): TelegramMessage {
+function telegramPhotoMessage(
+  caption: string,
+  threadId: number,
+  fileId: string,
+  userId = TEST_ALLOWED_TELEGRAM_USER_ID
+): TelegramMessage {
   return {
     message_id: nextMessageId++,
     date: Math.floor(Date.now() / 1000),
@@ -145,7 +151,7 @@ function telegramDocumentMessage(
   fileId: string,
   fileName: string,
   mimeType = "text/plain",
-  userId = 16708526
+  userId = TEST_ALLOWED_TELEGRAM_USER_ID
 ): TelegramMessage {
   return {
     message_id: nextMessageId++,
@@ -169,7 +175,7 @@ function telegramDocumentMessage(
   };
 }
 
-function telegramVoiceMessage(threadId: number, fileId: string, userId = 16708526): TelegramMessage {
+function telegramVoiceMessage(threadId: number, fileId: string, userId = TEST_ALLOWED_TELEGRAM_USER_ID): TelegramMessage {
   return {
     message_id: nextMessageId++,
     date: Math.floor(Date.now() / 1000),
@@ -404,7 +410,7 @@ exit 255
     FACTORY_WORKERS_FILE: workersFile,
     FACTORY_CODEX_BIN: fakeCodex,
     FACTORY_TELEGRAM_BOT_TOKEN: "test-token",
-    FACTORY_ALLOWED_TELEGRAM_USER_ID: "16708526"
+    FACTORY_ALLOWED_TELEGRAM_USER_ID: String(TEST_ALLOWED_TELEGRAM_USER_ID)
   });
 
   ensureProjectPaths(config);
