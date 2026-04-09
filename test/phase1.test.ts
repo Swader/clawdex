@@ -428,6 +428,7 @@ exit 255
     root,
     controlRoot,
     factoryRoot,
+    fakeCodex,
     previousPath,
     db,
     cronManager,
@@ -746,6 +747,45 @@ test("phase 1 inbound Telegram media stages files and only forwards images to Co
     await fixture.commands.handleMessage(voiceMessage);
     expect(fixture.telegram.sent.at(-1)?.text).toContain("Audio and voice Telegram messages are not forwarded to Codex yet.");
     expect(await readFile(join(mediaRoot, ".factory", "fake-turn-count"), "utf8")).toBe(turnCountBeforeVoice);
+  } finally {
+    process.env.PATH = fixture.previousPath;
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+}, 15_000);
+
+test("runCodex aborts quickly if the worktree deletes itself during execution", async () => {
+  const fixture = await createFixture();
+
+  try {
+    await fixture.commands.handleMessage(telegramMessage("/newctx selfdestruct control scratch", 90));
+    const context = fixture.db.getContextBySlug("selfdestruct");
+    const worktreePath = context?.worktreePath;
+    expect(worktreePath).toBeTruthy();
+
+    await makeExecutable(
+      fixture.fakeCodex,
+      `#!/usr/bin/env bash
+set -euo pipefail
+cat >/dev/null
+sleep 30
+`
+    );
+
+    const startedAt = Date.now();
+    const resultPromise = fixture.workers.runCodex(
+      context!,
+      "Remove everything.",
+      "run",
+      join(fixture.controlRoot, "logs", "selfdestruct.log")
+    );
+    await Bun.sleep(250);
+    await rm(worktreePath!, { recursive: true, force: true });
+    const result = await resultPromise;
+
+    expect(result.ok).toBe(false);
+    expect(result.exitCode).toBe(88);
+    expect(result.stderr).toContain("worktree disappeared during Codex run");
+    expect(Date.now() - startedAt).toBeLessThan(10_000);
   } finally {
     process.env.PATH = fixture.previousPath;
     await rm(fixture.root, { recursive: true, force: true });

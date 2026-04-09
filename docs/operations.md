@@ -270,6 +270,7 @@ If the worker is unavailable, context creation should land in `pending`.
 - Inspect `/tail`
 - Fix the local repo/workspace issue
 - Retry `/run`, `/resume`, or `/newctx`
+- If a task deleted its own bound worktree, the run should now fail cleanly instead of leaving the topic permanently busy. Older stuck runs still need a one-time `systemctl --user restart telemux.service` or manual process cleanup.
 
 ### Telegram receives nothing
 

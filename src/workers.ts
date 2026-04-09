@@ -291,26 +291,84 @@ prompt_b64=${quoteSh(promptBase64)}
 resume_session=${quoteSh(resumeSessionId)}
 codex_bin=${quoteSh(this.config.codexBin)}
 worktree="$(expand_home_path "$worktree_raw")"
+launcher_dir="$(mktemp -d "\${TMPDIR:-/tmp}/clawdex-run.XXXXXX")"
+prompt_file="$launcher_dir/control-plane.prompt.md"
+runner_file="$launcher_dir/run-codex.sh"
+
+cleanup() {
+  rm -rf "$launcher_dir"
+}
+
+terminate_codex_run() {
+  if [ -n "\${codex_pgid:-}" ]; then
+    kill -TERM -- "-$codex_pgid" 2>/dev/null || true
+  fi
+  kill "$codex_pid" 2>/dev/null || true
+  if command -v pkill >/dev/null 2>&1; then
+    pkill -TERM -P "$codex_pid" 2>/dev/null || true
+  fi
+  sleep 1
+  if [ -n "\${codex_pgid:-}" ] && kill -0 -- "-$codex_pgid" 2>/dev/null; then
+    kill -KILL -- "-$codex_pgid" 2>/dev/null || true
+  fi
+  if kill -0 "$codex_pid" 2>/dev/null; then
+    kill -9 "$codex_pid" 2>/dev/null || true
+  fi
+  if command -v pkill >/dev/null 2>&1; then
+    pkill -KILL -P "$codex_pid" 2>/dev/null || true
+  fi
+}
+
+trap cleanup EXIT
 
 if ! command -v "$codex_bin" >/dev/null 2>&1; then
   echo "codex binary not found on worker: $codex_bin" >&2
   exit 30
 fi
 
+printf '%s' "$prompt_b64" | base64 -d > "$prompt_file"
+cat > "$runner_file" <<'__CLAWDEX_RUNNER__'
+set -euo pipefail
+${modelArgScript}
+image_args=()
 cd "$worktree"
 mkdir -p .factory
 rm -f ${quoteSh(TELEGRAM_ATTACHMENTS_WORKSPACE_PATH)}
-printf '%s' "$prompt_b64" | base64 -d > .factory/control-plane.prompt.md
-${modelArgScript}
-image_args=()
+cp "$prompt_file" .factory/control-plane.prompt.md
 ${workspaceSeedScript}
 ${imageArgScript}
 
 if ${shouldResume ? "true" : "false"}; then
-  "$codex_bin" exec resume --json --output-last-message .factory/last-message.txt --dangerously-bypass-approvals-and-sandbox "\${model_args[@]}" "\${image_args[@]}" "$resume_session" - < .factory/control-plane.prompt.md
+  exec "$codex_bin" exec resume --json --output-last-message .factory/last-message.txt --dangerously-bypass-approvals-and-sandbox "\${model_args[@]}" "\${image_args[@]}" "$resume_session" - < "$prompt_file"
 else
-  "$codex_bin" exec --json --output-last-message .factory/last-message.txt --dangerously-bypass-approvals-and-sandbox "\${model_args[@]}" "\${image_args[@]}" - < .factory/control-plane.prompt.md
+  exec "$codex_bin" exec --json --output-last-message .factory/last-message.txt --dangerously-bypass-approvals-and-sandbox "\${model_args[@]}" "\${image_args[@]}" - < "$prompt_file"
 fi
+__CLAWDEX_RUNNER__
+chmod +x "$runner_file"
+export worktree prompt_file resume_session codex_bin
+
+if command -v setsid >/dev/null 2>&1; then
+  setsid bash "$runner_file" &
+  codex_pid=$!
+  codex_pgid=$codex_pid
+else
+  bash "$runner_file" &
+  codex_pid=$!
+  codex_pgid=""
+fi
+
+while kill -0 "$codex_pid" 2>/dev/null; do
+  if [ ! -d "$worktree" ]; then
+    echo "worktree disappeared during Codex run: $worktree" >&2
+    terminate_codex_run
+    wait "$codex_pid" || true
+    exit 88
+  fi
+
+  sleep 1
+done
+
+wait "$codex_pid"
 `;
 
     let stdoutBuffer = "";

@@ -123,15 +123,16 @@ If a remote worker is unavailable, context creation does not hard-fail. The cont
 1. Ensure the context workspace exists, or keep it `pending` if the worker is unreachable.
 2. If the triggering Telegram message included supported media, download it and stage it into `.factory/inbox/telegram/<message_id>/` in the workspace.
 3. Run `codex exec` or `codex exec resume <session_id>` in the workspace, adding `--image` for staged image inputs and any topic-local `-m` / `-c model_reasoning_effort=...` overrides.
-4. Capture the current session id.
-5. Read `.factory/SUMMARY.md`, `.factory/ARTIFACTS.md`, and `.factory/last-message.txt`.
-6. Read the optional ephemeral Telegram upload manifest `.factory/TELEGRAM_ATTACHMENTS.json`.
-7. Read the optional ephemeral cron-change manifest `.factory/CRON_REQUESTS.json`.
-8. Persist the new session id, summary, error, and timestamps.
-9. Apply any validated cron actions requested by the manifest.
-10. While the job is active, emit a `sendChatAction(typing)` heartbeat into the same Telegram topic.
-11. Post the concise result back into the same Telegram topic.
-12. If the manifest requested attachments, fetch the recorded files from the worker workspace and upload them into the same Telegram topic.
+4. The worker launcher monitors the bound worktree during the run and aborts cleanly if that worktree disappears, so a self-deleting task cannot wedge the topic forever.
+5. Capture the current session id.
+6. Read `.factory/SUMMARY.md`, `.factory/ARTIFACTS.md`, and `.factory/last-message.txt`.
+7. Read the optional ephemeral Telegram upload manifest `.factory/TELEGRAM_ATTACHMENTS.json`.
+8. Read the optional ephemeral cron-change manifest `.factory/CRON_REQUESTS.json`.
+9. Persist the new session id, summary, error, and timestamps.
+10. Apply any validated cron actions requested by the manifest.
+11. While the job is active, emit a `sendChatAction(typing)` heartbeat into the same Telegram topic.
+12. Post the concise result back into the same Telegram topic.
+13. If the manifest requested attachments, fetch the recorded files from the worker workspace and upload them into the same Telegram topic.
 
 ### Internal scheduler
 
