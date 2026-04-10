@@ -168,7 +168,13 @@ function sleep(ms: number): Promise<void> {
 }
 
 function compactError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return redactTelegramSecrets(error instanceof Error ? error.message : String(error));
+}
+
+function redactTelegramSecrets(value: string): string {
+  return value
+    .replace(/bot\d+:[A-Za-z0-9_-]+/g, "bot<redacted>")
+    .replace(/(api\.telegram\.org\/(?:file\/)?bot)[^/\s)]+/g, "$1<redacted>");
 }
 
 function scopeLabel(scope: TelegramBotCommandScope): string {
@@ -302,7 +308,12 @@ export class TelegramBot {
       throw new Error("telegram bot token is not configured");
     }
 
-    const response = await fetch(`https://api.telegram.org/file/bot${this.config.telegramBotToken}/${filePath}`);
+    let response: Response;
+    try {
+      response = await fetch(`https://api.telegram.org/file/bot${this.config.telegramBotToken}/${filePath}`);
+    } catch (error) {
+      throw new Error(`telegram file download request failed: ${compactError(error)}`);
+    }
     if (!response.ok) {
       throw new Error(`telegram file download failed with ${response.status}`);
     }
@@ -414,7 +425,7 @@ export class TelegramBot {
           }
         }
       } catch (error) {
-        console.error("telegram poll failed", error);
+        console.error("telegram poll failed", compactError(error));
         await sleep(3000);
       }
     }
@@ -453,22 +464,32 @@ export class TelegramBot {
   }
 
   private async api<T>(method: string, payload: Record<string, unknown>): Promise<T> {
-    const response = await fetch(`https://api.telegram.org/bot${this.config.telegramBotToken}/${method}`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json"
-      },
-      body: JSON.stringify(payload)
-    });
+    let response: Response;
+    try {
+      response = await fetch(`https://api.telegram.org/bot${this.config.telegramBotToken}/${method}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify(payload)
+      });
+    } catch (error) {
+      throw new Error(`telegram api ${method} request failed: ${compactError(error)}`);
+    }
 
     return this.parseApiResponse<T>(method, response);
   }
 
   private async apiMultipart<T>(method: string, payload: FormData): Promise<T> {
-    const response = await fetch(`https://api.telegram.org/bot${this.config.telegramBotToken}/${method}`, {
-      method: "POST",
-      body: payload
-    });
+    let response: Response;
+    try {
+      response = await fetch(`https://api.telegram.org/bot${this.config.telegramBotToken}/${method}`, {
+        method: "POST",
+        body: payload
+      });
+    } catch (error) {
+      throw new Error(`telegram api ${method} multipart request failed: ${compactError(error)}`);
+    }
 
     return this.parseApiResponse<T>(method, response);
   }
